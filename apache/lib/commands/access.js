@@ -24,8 +24,24 @@ var AccessLog = function(inputFile, outputFile, app){
   this.checkoutRegex = /^\/[a-z]{2}\/checkout\//;
   this.checkoutLocaleRegex = /^\/[a-z]{2}([\/a-zA-Z0-9]+)$/;
   
-  //start the data array
-  this.data = [];
+  //list the parsers
+  this.reportParsers = {
+    checkout: {
+      init: this._initialiseCheckoutReport,
+      parseItem: this._buildCheckoutReportItem,
+      finish: this._buildCheckoutReportFinish
+    },
+    error: {
+      init: this._initialiseErrorReport,
+      parseItem: this._buildErrorReportItem,
+      finish: this._buildErrorReportFinish,
+    },
+    time: {
+      init: this._initialiseUrlLoadTimeReport,
+      parseItem: this._buildUrlLoadTimeReportItem,
+      finish: this._buildUrlLoadTimeReportFinish
+    }
+  }
 }
 
 AccessLog.prototype._filename = function(prefix)
@@ -41,45 +57,37 @@ AccessLog.prototype.setRegex = function(regex)
 AccessLog.prototype.help = function()
 {
   this.app.log.help("--input          specify a single input file");
-  this.app.log.help("--dir            specify an input file directory, all files in directory will be parsed");
   this.app.log.help("--output         specify an output file");
-  this.app.log.help("--regex=\"...\"  specify a custom regex");
   this.app.log.help("--help           display this help");
+  this.app.log.help("--report         report to run");
+  this.app.log.help("                 possible report types:");
+  for(var k in this.reportParsers){
+    this.app.log.help("                    "+k);
+  }
 }
 
-AccessLog.prototype.parse = function()
+AccessLog.prototype.parse = function(reportType)
 {
   //create the stream
   var file = fs.createReadStream(this.accessLog);
   this._parsedLine = 0;
+  this.reportType = reportType;
   
   
   //START THE REPORT
-  this.checkoutReport = {};
+  this.reportParsers[this.reportType].init();
   
   //assign the events
   file.on('data', this._parseLine.bind(this));
   file.on('end', function(){
-    //this._buildUrlLoadTimeReport();
-    //this._buildErrorReport();
-    //this._buildCheckoutReport();
-    
-    this._buildCheckoutReportFinish();
+    //finish the report
+    this.reportParsers[this.reportType].finish();
   }.bind(this));
 }
 
-AccessLog.prototype._buildCheckoutReport = function()
+AccessLog.prototype._initialiseCheckoutReport = function()
 {
-  console.log('Start Checkout Report');
-  
   this.checkoutReport = {};
-  
-  for(var i = 0; i < this.data.length; i++){
-    var data = this.data[i];
-    this._buildCheckoutReportItem(data);
-  }
-  
-  this._buildCheckoutReportFinish();
 }
 
 AccessLog.prototype._buildCheckoutReportItem = function(data)
@@ -125,8 +133,6 @@ AccessLog.prototype._buildCheckoutReportItem = function(data)
 
 AccessLog.prototype._buildCheckoutReportFinish = function()
 {
-  console.log('Sort out averages');
-  
   //build the averages
   for(var key in this.checkoutReport){
     this.checkoutReport[key].timeAve = this.checkoutReport[key].timeAve / this.checkoutReport[key].count;
@@ -136,44 +142,47 @@ AccessLog.prototype._buildCheckoutReportFinish = function()
   common.outputCsv(['path','code','date','hit count','average load time','max load time','min load time'], this.checkoutReport, this._filename('checkout-report'));
 }
 
-AccessLog.prototype._buildErrorReport = function()
+AccessLog.prototype._initialiseErrorReport = function()
 {
   this.errorReport = {};
+}
+
+AccessLog.prototype._buildErrorReportItem = function(data)
+{
+  if(!data.site.match(this.storeRegex) || data.responseCode == 200){
+    return;
+  }
+
+  var path = data.requestPath.split('?')[0];
+  path = path.split('uenc')[0];
   
-  for(var i = 0; i < this.data.length; i++){
-    var data = this.data[i];
-    if(!data.site.match(this.storeRegex) || data.responseCode == 200){
-      continue;
-    }
+  var identifier = path+'-'+data.responseCode;
   
-    var path = data.requestPath.split('?')[0];
-    path = path.split('uenc')[0];
-    
-    var identifier = path+'-'+data.responseCode;
-    
-    //we're not interested in site - just path and code
-    if(!this.errorReport[identifier]){
-      this.errorReport[identifier] = {
-        path: path,
-        timeAve: 0,
-        count: 0,
-        responseCode: data.responseCode,
-        timeMax: data.pageTime,
-        timeMin: data.pageTime
-      }
-    }
-    
-    //update the information
-    this.errorReport[identifier].timeAve += data.pageTime;
-    this.errorReport[identifier].count++;
-    if(this.errorReport[identifier].timeMin > data.pageTime){
-      this.errorReport[identifier].timeMin = data.pageTime;
-    }
-    if(this.errorReport[identifier].timeMax < data.pageTime){
-      this.errorReport[identifier].timeMax = data.pageTime;
+  //we're not interested in site - just path and code
+  if(!this.errorReport[identifier]){
+    this.errorReport[identifier] = {
+      path: path,
+      timeAve: 0,
+      count: 0,
+      responseCode: data.responseCode,
+      timeMax: data.pageTime,
+      timeMin: data.pageTime
     }
   }
   
+  //update the information
+  this.errorReport[identifier].timeAve += data.pageTime;
+  this.errorReport[identifier].count++;
+  if(this.errorReport[identifier].timeMin > data.pageTime){
+    this.errorReport[identifier].timeMin = data.pageTime;
+  }
+  if(this.errorReport[identifier].timeMax < data.pageTime){
+    this.errorReport[identifier].timeMax = data.pageTime;
+  }
+}
+
+AccessLog.prototype._buildErrorReportFinish = function()
+{
   //build the averages
   for(var key in this.errorReport){
     this.errorReport[key].timeAve = this.errorReport[key].timeAve / this.errorReport[key].count;
@@ -182,48 +191,50 @@ AccessLog.prototype._buildErrorReport = function()
   common.outputCsv(['path','average load time','hit count','code','max load time','min load time'], this.errorReport, this._filename('error-report'));
 }
 
-AccessLog.prototype._buildUrlLoadTimeReport = function()
+AccessLog.prototype._initialiseUrlLoadTimeReport = function()
 {
   this.loadtimeReport = {};
+}
+
+AccessLog.prototype._buildUrlLoadTimeReportItem = function(data)
+{
+  var path = data.requestPath.split('?')[0];
+  path = path.split('uenc')[0];
+  var identifier = data.site+'-'+path;
   
-  for(var i = 0; i < this.data.length; i++){
-    var data = this.data[i];
-    
-    var path = data.requestPath.split('?')[0];
-    path = path.split('uenc')[0];
-    var identifier = data.site+'-'+path;
-    
-    if(!data.site.match(this.storeRegex)){
-      continue;
-    }
-    
-    //setup the data for the first thing
-    if(!this.loadtimeReport[identifier]){
-      this.loadtimeReport[identifier] = {
-        site: data.site,
-        url: path,
-        timeAve: 0,
-        count: 0,
-        timeMin: data.pageTime,
-        timeMinDate: new Date(data.timeStamp).toJSON().replace('T', ' ').split('.')[0],
-        timeMax: data.pageTime,
-        timeMaxDate: new Date(data.timeStamp).toJSON().replace('T', ' ').split('.')[0]
-      };
-    }
-    
-    //update
-    this.loadtimeReport[identifier].timeAve += data.pageTime;
-    this.loadtimeReport[identifier].count++;
-    if(this.loadtimeReport[identifier].timeMin > data.pageTime){
-      this.loadtimeReport[identifier].timeMin = data.pageTime;
-      this.loadtimeReport[identifier].timeMinDate = new Date(data.timeStamp);
-    }
-    if(this.loadtimeReport[identifier].timeMax < data.pageTime){
-      this.loadtimeReport[identifier].timeMax = data.pageTime;
-      this.loadtimeReport[identifier].timeMaxDate = new Date(data.timeStamp);
-    }
+  if(!data.site.match(this.storeRegex)){
+    return;
   }
   
+  //setup the data for the first thing
+  if(!this.loadtimeReport[identifier]){
+    this.loadtimeReport[identifier] = {
+      site: data.site,
+      url: path,
+      timeAve: 0,
+      count: 0,
+      timeMin: data.pageTime,
+      timeMinDate: new Date(data.timeStamp).toJSON().replace('T', ' ').split('.')[0],
+      timeMax: data.pageTime,
+      timeMaxDate: new Date(data.timeStamp).toJSON().replace('T', ' ').split('.')[0]
+    };
+  }
+  
+  //update
+  this.loadtimeReport[identifier].timeAve += data.pageTime;
+  this.loadtimeReport[identifier].count++;
+  if(this.loadtimeReport[identifier].timeMin > data.pageTime){
+    this.loadtimeReport[identifier].timeMin = data.pageTime;
+    this.loadtimeReport[identifier].timeMinDate = new Date(data.timeStamp).toJSON().replace('T', ' ').split('.')[0];
+  }
+  if(this.loadtimeReport[identifier].timeMax < data.pageTime){
+    this.loadtimeReport[identifier].timeMax = data.pageTime;
+    this.loadtimeReport[identifier].timeMaxDate = new Date(data.timeStamp).toJSON().replace('T', ' ').split('.')[0];
+  }
+}
+
+AccessLog.prototype._buildUrlLoadTimeReportFinish = function()
+{
   //now calculate the averages
   for(var key in this.loadtimeReport){
     this.loadtimeReport[key].timeAve = this.loadtimeReport[key].timeAve / this.loadtimeReport[key].count;
@@ -263,9 +274,7 @@ AccessLog.prototype._parseLine = function(line)
     };
     
     //BUILD REPORT ITEM
-    this._buildCheckoutReportItem(lineData);
-    
-    //this.data.push(lineData);
+    this.reportParsers[this.reportType].parseItem(lineData);
   }
   console.log('Data Parsed - '+this._parsedLine);
 }
@@ -274,9 +283,11 @@ AccessLog.prototype._parseLine = function(line)
 //run the function
 var access = module.exports = function accessLog (cmd, cb) {
   
+  var parser = new AccessLog(this.argv.input, this.argv.output, this);
+  
   //print help
   if(cmd == 'help'){
-    AccessLog.help();
+    parser.help();
     cb(null);
     return;
   }
@@ -284,8 +295,7 @@ var access = module.exports = function accessLog (cmd, cb) {
 
   //start the object
   if(this.argv.output){
-    var parser = new AccessLog(this.argv.input, this.argv.output, this);
-    parser.parse();
+    parser.parse(this.argv.report);
   }
   
   cb(null);
